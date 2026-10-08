@@ -1,36 +1,27 @@
-# led_blinky_peripheral
+# Parcial 1 - Microcontroladores / Algoritmos en C
 
-## Overview
-The LED Blinky demo application provides a sanity check for the new SDK build environments and board bring up. The LED Blinky demo 
-uses the systick interrupt to realize the function of timing delay. The example takes turns to shine the LED. The purpose of this 
-demo is to provide a simple project for debugging and further development.
-The code of this demo has been prepared and updated for use with the MCUXpresso Configuration Tools (Pins/Clocks/Peripherals).
-
-## Supported Boards
-- [FRDM-MCXA156](#board-specific-information-for-frdmmcxa156)
+- **Estudiante:** Thalía Aminisha Pimentel
+- **Matrícula:** 20250531
+- **Plataforma / Tarjeta:** FRDM-MCXA156 (NXP MCX A156)
+- **Repositorio:** [thaliaaminishapimentel/parcial1](https://github.com/thaliaaminishapimentel/parcial1)
 
 ---
 
-## Board-Specific Information for frdmmcxa156
+## Descripción del Proyecto
+Proyecto correspondiente al Primer Parcial. Implementación de control embebido en C sobre la tarjeta de desarrollo NXP FRDM-MCXA156, con configuración de pines, reloj, periféricos GPIO e interrupción por SysTick.
 
-### Hardware requirements
-- Type-C USB cable
-- FRDM-MCXA156 board
-- Personal Computer
+## Estructura del Repositorio
+- `led_blinky.c`: Programa principal de control.
+- `frdmmcxa156/`: Archivos de configuración de hardware, pines, reloj y tarjeta.
+- `analisis/`: Análisis del problema, diseño y especificaciones.
+- `pruebas/`: Casos de prueba de entrada/salida y validaciones.
+- `evidencias/`: Pruebas de escritorio, capturas y evidencias de ejecución en hardware.
 
-### Board settings
-No special settings are required.
+## Compilación y Ejecución
+1. Conectar la tarjeta FRDM-MCXA156 mediante cable USB Tipo-C al puerto MCU-Link.
+2. Abrir el proyecto en MCUXpresso for Visual Studio Code / IDE compatible con MCUXpresso SDK.
+3. Compilar usando CMake / Ninja y cargar el binario a la tarjeta.
+4. Ejecutar o depurar mediante el depurador integrado MCU-Link.
 
-### Prepare the Demo
-1.  Connect a USB Type-C cable between the host PC and the MCU-Link USB port on the target board.
-2.  Open a serial terminal with the following settings:
-    - 115200 baud rate
-    - 8 data bits
-    - No parity
-    - One stop bit
-    - No flow control
-3.  Download the program to the target board.
-4.  Either press the reset button on your board or launch the debugger in your IDE to begin running the demo.
-
-### Running the demo
-When the demo runs successfully, you will find the LED is blinking.
+## Estado Actual
+Configuración inicial y periféricos listos. Estructura de entrega preparada de acuerdo con la rúbrica del parcial.
