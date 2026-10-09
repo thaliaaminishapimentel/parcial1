@@ -192,3 +192,65 @@ uint32_t Button_GetLongPressCount(void)
 {
     return s_longPressCount;
 }
+
+/*******************************************************************************
+ * Base de Tiempo Periférica de 1 ms (CTIMER0 Match 0)
+ * Requisito: SysTick no sustituye este temporizador periférico.
+ ******************************************************************************/
+
+static volatile uint32_t g_systemMs = 0U;
+
+void APP_TICK_IRQHandler(void)
+{
+    /* Verificar y limpiar bandera de Match 0 de CTIMER0 */
+    uint32_t intFlags = CTIMER0->MSR;
+    if (intFlags & (1UL << 0U))
+    {
+        CTIMER0->MSR = (1UL << 0U); /* Limpiar Match 0 flag */
+        g_systemMs++;
+    }
+    SDK_ISR_EXIT_BARRIER;
+}
+
+void Timer_TickInit(void)
+{
+    /* Habilitar reloj periférico para CTIMER0 */
+    CLOCK_SetClockDiv(kCLOCK_DivCTIMER0, 1U);
+    CLOCK_AttachClk(kFRO_HF_to_CTIMER0);
+    RESET_ReleasePeripheralReset(kCTIMER0_RST_SHIFT_RSTn);
+
+    /* Desactivar timer durante configuración */
+    CTIMER0->TCR = 0U;
+
+    /* Modo timer estándar incrementando por reloj de bus/funcional */
+    CTIMER0->CTCR = 0U;
+
+    /* Prescaler: FRO_HF corre a 48 MHz.
+     * Prescaler = (48000000 / 1000000) - 1 = 47 para contar a 1 MHz (1 us por conteo)
+     */
+    CTIMER0->PR = (48000000U / 1000000U) - 1U;
+
+    /* Match 0 para generar interrupción cada 1000 microsegundos = 1 ms */
+    CTIMER0->MR[0] = 1000U - 1U;
+
+    /* MCR:
+     * Bit 0 (MR0I): Interrupción al coincidir MR0
+     * Bit 1 (MR0R): Reiniciar contador al coincidir MR0
+     * Bit 2 (MR0S): No detener contador
+     */
+    CTIMER0->MCR = (1UL << 0U) | (1UL << 1U);
+
+    /* Limpiar flags previos y configurar NVIC */
+    CTIMER0->MSR = 0xFFFFFFFFU;
+    NVIC_SetPriority(APP_TICK_IRQn, 2);
+    EnableIRQ(APP_TICK_IRQn);
+
+    /* Iniciar temporizador (TCR bit 0 = CEN) */
+    CTIMER0->TCR = (1UL << 0U);
+}
+
+uint32_t Timer_GetMs(void)
+{
+    /* Lectura de 32 bits atómica en ARM Cortex-M33 */
+    return g_systemMs;
+}

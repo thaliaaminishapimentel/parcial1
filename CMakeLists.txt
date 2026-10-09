@@ -18,6 +18,7 @@ include(${board}/board_files.cmake)
 
 mcux_add_source(
     SOURCES led_blinky.c
+            20250531.c
 )
 
 mcux_add_source(

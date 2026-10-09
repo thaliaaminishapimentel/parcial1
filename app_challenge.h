@@ -52,7 +52,16 @@ typedef enum {
 } app_state_t;
 
 /*******************************************************************************
- * Prototipos de Funciones de GPIO y Botón
+ * Definiciones de Temporizador CTIMER0 (Tick de 1 ms)
+ ******************************************************************************/
+#define APP_TICK_TIMER             CTIMER0
+#define APP_TICK_CLK_ATTACH        kFRO_HF_to_CTIMER0
+#define APP_TICK_CLK_FREQ          48000000U
+#define APP_TICK_IRQn              CTIMER0_IRQn
+#define APP_TICK_IRQHandler        CTIMER0_IRQHandler
+
+/*******************************************************************************
+ * Prototipos de Funciones de GPIO, Botón y Temporizador
  ******************************************************************************/
 
 void GPIO_InitApp(void);
@@ -65,5 +74,9 @@ button_event_t Button_ProcessTick(void);
 /* Contadores de pulsaciones */
 uint32_t Button_GetShortPressCount(void);
 uint32_t Button_GetLongPressCount(void);
+
+/* Base de tiempo periférica de 1 ms */
+void Timer_TickInit(void);
+uint32_t Timer_GetMs(void);
 
 #endif /* _APP_CHALLENGE_H_ */
