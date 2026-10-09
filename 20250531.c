@@ -783,3 +783,169 @@ void Uart_ProcessConsole(void)
         }
     }
 }
+
+/*******************************************************************************
+ * Máquina de Estados Finito (FSM) y Rampa Triangular
+ * - MANUAL (inicial): PWM 1 kHz, duty 25%, LED encendido fijo. Pulsación corta -> AUTO.
+ * - AUTO: Rampa triangular 10% a 90% (paso 1% cada 20 ms, ciclo total 3.2s). LED alterna 500 ms.
+ *         Pulsación corta -> MANUAL (restaura último duty manual).
+ * - PAUSA: PWM 0%, LED alterna 125 ms. Conserva modo, duty y dirección.
+ *          Pulsación larga o RESUME -> reanuda estado previo.
+ *          Pulsación corta en PAUSA se ignora.
+ ******************************************************************************/
+
+static app_state_t s_previousState = STATE_MANUAL;
+static int32_t     s_autoDuty      = 10;
+static bool        s_autoAscending = true;
+static uint32_t    s_lastRampTimeMs = 0U;
+static uint32_t    s_lastLedBlinkTimeMs = 0U;
+
+void Fsm_Init(void)
+{
+    g_appCurrentState = STATE_MANUAL;
+    g_manualSavedDuty = PWM_DEFAULT_DUTY_PERCENT;
+    s_previousState   = STATE_MANUAL;
+
+    s_autoDuty        = 10;
+    s_autoAscending   = true;
+
+    /* Estado inicial MANUAL: LED encendido fijo, duty 25% */
+    StatusLed_Set(true);
+    Pwm_SetFrequency(PWM_DEFAULT_FREQ_HZ);
+    Pwm_SetDuty(g_manualSavedDuty);
+
+    s_lastRampTimeMs = Timer_GetMs();
+    s_lastLedBlinkTimeMs = Timer_GetMs();
+}
+
+app_state_t Fsm_GetState(void)
+{
+    return g_appCurrentState;
+}
+
+void Fsm_Process(button_event_t btnEvent)
+{
+    uint32_t now = Timer_GetMs();
+
+    /* 1. Transiciones por pulsador */
+    switch (g_appCurrentState)
+    {
+        case STATE_MANUAL:
+            if (btnEvent == BTN_EVENT_SHORT)
+            {
+                /* Transición MANUAL -> AUTO: inicia en 10% ascendiendo */
+                g_appCurrentState = STATE_AUTO;
+                s_autoDuty = 10;
+                s_autoAscending = true;
+                Pwm_SetDuty((uint32_t)s_autoDuty);
+                s_lastRampTimeMs = now;
+                s_lastLedBlinkTimeMs = now;
+            }
+            else if (btnEvent == BTN_EVENT_LONG)
+            {
+                /* Transición MANUAL -> PAUSA */
+                s_previousState = STATE_MANUAL;
+                g_appCurrentState = STATE_PAUSA;
+                Pwm_SetDuty(0U);
+                s_lastLedBlinkTimeMs = now;
+            }
+            break;
+
+        case STATE_AUTO:
+            if (btnEvent == BTN_EVENT_SHORT)
+            {
+                /* Transición AUTO -> MANUAL: restaura último duty manual */
+                g_appCurrentState = STATE_MANUAL;
+                Pwm_SetDuty(g_manualSavedDuty);
+                StatusLed_Set(true); /* Fijo encendido en MANUAL */
+            }
+            else if (btnEvent == BTN_EVENT_LONG)
+            {
+                /* Transición AUTO -> PAUSA: conserva duty, dirección y parámetros */
+                s_previousState = STATE_AUTO;
+                g_appCurrentState = STATE_PAUSA;
+                Pwm_SetDuty(0U);
+                s_lastLedBlinkTimeMs = now;
+            }
+            break;
+
+        case STATE_PAUSA:
+            /* Pulsación corta en PAUSA se ignora estrictamente */
+            if (btnEvent == BTN_EVENT_LONG)
+            {
+                /* Pulsación larga en PAUSA: reanuda estado previo */
+                g_appCurrentState = s_previousState;
+                if (g_appCurrentState == STATE_MANUAL)
+                {
+                    Pwm_SetDuty(g_manualSavedDuty);
+                    StatusLed_Set(true);
+                }
+                else if (g_appCurrentState == STATE_AUTO)
+                {
+                    /* Continúa rampa desde valores y dirección guardados */
+                    Pwm_SetDuty((uint32_t)s_autoDuty);
+                    s_lastRampTimeMs = now;
+                    s_lastLedBlinkTimeMs = now;
+                }
+            }
+            break;
+
+        default:
+            g_appCurrentState = STATE_MANUAL;
+            break;
+    }
+
+    /* 2. Comportamiento continuo de cada estado */
+    switch (g_appCurrentState)
+    {
+        case STATE_MANUAL:
+            /* LED de estado encendido fijo */
+            StatusLed_Set(true);
+            break;
+
+        case STATE_AUTO:
+            /* A. Actualización de rampa triangular: cada 20 ms, paso de 1 punto porcentual */
+            if ((uint32_t)(now - s_lastRampTimeMs) >= 20U)
+            {
+                s_lastRampTimeMs = now;
+
+                if (s_autoAscending)
+                {
+                    s_autoDuty++;
+                    if (s_autoDuty >= 90)
+                    {
+                        s_autoDuty = 90;
+                        s_autoAscending = false; /* Alcanzó cresta: comienza descenso */
+                    }
+                }
+                else
+                {
+                    s_autoDuty--;
+                    if (s_autoDuty <= 10)
+                    {
+                        s_autoDuty = 10;
+                        s_autoAscending = true; /* Alcanzó valle: comienza ascenso */
+                    }
+                }
+                Pwm_SetDuty((uint32_t)s_autoDuty);
+            }
+
+            /* B. LED de estado en AUTO: alterna cada 500 ms */
+            if ((uint32_t)(now - s_lastLedBlinkTimeMs) >= 500U)
+            {
+                s_lastLedBlinkTimeMs = now;
+                StatusLed_Toggle();
+            }
+            break;
+
+        case STATE_PAUSA:
+            /* PWM en 0% asegurado */
+            /* LED de estado en PAUSA: alterna rápidamente cada 125 ms */
+            if ((uint32_t)(now - s_lastLedBlinkTimeMs) >= 125U)
+            {
+                s_lastLedBlinkTimeMs = now;
+                StatusLed_Toggle();
+            }
+            break;
+    }
+}

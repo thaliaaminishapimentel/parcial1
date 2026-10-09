@@ -28,6 +28,7 @@ int main(void)
     Timer_TickInit();
     Pwm_Init(PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_DUTY_PERCENT);
     Uart_InitConsole();
+    Fsm_Init();
 
     Uart_SendString("\r\n========================================\r\n");
     Uart_SendString("FRDM-MCXA156: Controlador de Iluminacion\r\n");
@@ -46,20 +47,13 @@ int main(void)
         /* Tarea 1: Procesar comandos UART de forma continua y no bloqueante */
         Uart_ProcessConsole();
 
-        /* Tarea 2 (cada 1 ms): Procesar antirrebote y eventos del pulsador */
+        /* Tarea 2 (cada 1 ms): Procesar botón y actualizar la Máquina de Estados */
         if ((uint32_t)(now - lastTickService) >= 1U)
         {
             lastTickService = now;
 
             button_event_t btnEvent = Button_ProcessTick();
-            if (btnEvent == BTN_EVENT_SHORT)
-            {
-                StatusLed_Toggle();
-            }
-            else if (btnEvent == BTN_EVENT_LONG)
-            {
-                StatusLed_Set(false);
-            }
+            Fsm_Process(btnEvent);
         }
 
         /* Tarea 3 (cada 1000 ms): Telemetría periódica si STREAM ON está activo */

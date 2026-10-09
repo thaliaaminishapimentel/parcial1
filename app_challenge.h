@@ -109,4 +109,11 @@ void Uart_InitConsole(void);
 void Uart_SendString(const char *str);
 void Uart_ProcessConsole(void);
 
+/*******************************************************************************
+ * Definiciones y Prototipos de la Máquina de Estados (FSM)
+ ******************************************************************************/
+void Fsm_Init(void);
+void Fsm_Process(button_event_t btnEvent);
+app_state_t Fsm_GetState(void);
+
 #endif /* _APP_CHALLENGE_H_ */
