@@ -61,7 +61,20 @@ typedef enum {
 #define APP_TICK_IRQHandler        CTIMER0_IRQHandler
 
 /*******************************************************************************
- * Prototipos de Funciones de GPIO, Botón y Temporizador
+ * Definiciones de PWM por Hardware (CTIMER1 en P3_12 / CT1_MAT2)
+ * Conector J1 pin 15 -> Resistencia 1 kΩ -> Ánodo LED externo -> Cátodo a GND
+ ******************************************************************************/
+#define APP_PWM_TIMER              CTIMER1
+#define APP_PWM_CLK_ATTACH         kFRO_HF_to_CTIMER1
+#define APP_PWM_CLK_FREQ           48000000U
+#define APP_PWM_PERIOD_CH          kCTIMER_Match_3  /* Match 3 fija el período del PWM */
+#define APP_PWM_OUTPUT_CH          kCTIMER_Match_2  /* Match 2 genera la salida en P3_12 (CT1_MAT2) */
+
+#define PWM_DEFAULT_FREQ_HZ        1000U
+#define PWM_DEFAULT_DUTY_PERCENT   25U
+
+/*******************************************************************************
+ * Prototipos de Funciones de GPIO, Botón, Temporizador y PWM
  ******************************************************************************/
 
 void GPIO_InitApp(void);
@@ -78,5 +91,12 @@ uint32_t Button_GetLongPressCount(void);
 /* Base de tiempo periférica de 1 ms */
 void Timer_TickInit(void);
 uint32_t Timer_GetMs(void);
+
+/* PWM de hardware */
+status_t Pwm_Init(uint32_t freqHz, uint32_t dutyPercent);
+status_t Pwm_SetFrequency(uint32_t freqHz);
+status_t Pwm_SetDuty(uint32_t dutyPercent);
+uint32_t Pwm_GetFrequency(void);
+uint32_t Pwm_GetDuty(void);
 
 #endif /* _APP_CHALLENGE_H_ */

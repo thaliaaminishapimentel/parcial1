@@ -21,6 +21,7 @@ int main(void)
     /* 2. Inicialización de periféricos propios del reto */
     GPIO_InitApp();
     Timer_TickInit();
+    Pwm_Init(PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_DUTY_PERCENT);
 
     /* Variables de temporización no bloqueante basadas en diferencias de 32 bits */
     uint32_t lastTickService = Timer_GetMs();

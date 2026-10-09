@@ -254,3 +254,139 @@ uint32_t Timer_GetMs(void)
     /* Lectura de 32 bits atómica en ARM Cortex-M33 */
     return g_systemMs;
 }
+
+/*******************************************************************************
+ * Controlador de PWM por Hardware (CTIMER1 en P3_12 / ALT4 CT1_MAT2)
+ * Soporta frecuencias: 500 Hz, 1000 Hz, 2000 Hz
+ * Manejo estricto de 0% (nivel bajo constante) y 100% (nivel alto constante)
+ * sin pulsos residuales ni alterar la base de tiempo de CTIMER0.
+ ******************************************************************************/
+
+static uint32_t s_currentPwmFreqHz   = PWM_DEFAULT_FREQ_HZ;
+static uint32_t s_currentPwmDuty     = PWM_DEFAULT_DUTY_PERCENT;
+static uint32_t s_pwmPeriodCounts    = 0U;
+
+static void Pwm_ConfigurePinMux(bool enablePwmAlt)
+{
+    const port_pin_config_t pinConfig = {
+        .pullSelect = kPORT_PullDisable,
+        .slewRate = kPORT_FastSlewRate,
+        .passiveFilterEnable = kPORT_PassiveFilterDisable,
+        .openDrainEnable = kPORT_OpenDrainDisable,
+        .driveStrength = kPORT_LowDriveStrength,
+        /* ALT4: CT1_MAT2 (salida PWM), ALT0: GPIO3_12 para forzar nivel constante en 0% o 100% */
+        .mux = enablePwmAlt ? kPORT_MuxAlt4 : kPORT_MuxAlt0,
+        .inputBuffer = kPORT_InputBufferEnable,
+        .invertInput = kPORT_InputNormal,
+        .lockRegister = kPORT_UnlockRegister
+    };
+    PORT_SetPinConfig(PORT3, 12U, &pinConfig);
+}
+
+status_t Pwm_Init(uint32_t freqHz, uint32_t dutyPercent)
+{
+    if ((freqHz != 500U && freqHz != 1000U && freqHz != 2000U) || dutyPercent > 100U)
+    {
+        return kStatus_InvalidArgument;
+    }
+
+    s_currentPwmFreqHz = freqHz;
+    s_currentPwmDuty   = dutyPercent;
+
+    /* 1. Habilitar reloj de CTIMER1 */
+    CLOCK_SetClockDiv(kCLOCK_DivCTIMER1, 1U);
+    CLOCK_AttachClk(kFRO_HF_to_CTIMER1);
+    RESET_ReleasePeripheralReset(kCTIMER1_RST_SHIFT_RSTn);
+
+    /* 2. Configurar timer en modo contador básico */
+    CTIMER1->TCR = 0U;   /* Desactivar timer */
+    CTIMER1->CTCR = 0U;  /* Modo timer con reloj de periférico */
+    CTIMER1->PR = (APP_PWM_CLK_FREQ / 1000000U) - 1U; /* Prescaler a 1 MHz (1 us por tick) */
+
+    /* 3. Calcular cuentas de período: 1,000,000 / freqHz */
+    s_pwmPeriodCounts = 1000000U / freqHz;
+
+    /* Match 3 define el período y reinicia el contador */
+    CTIMER1->MR[3] = s_pwmPeriodCounts - 1U;
+    CTIMER1->MCR = (1UL << 10U); /* MR3R: Reset en Match 3 */
+
+    /* Habilitar PWM en canal Match 2 (PWMCON bit 2) */
+    CTIMER1->PWMC |= (1UL << 2U);
+
+    /* 4. Aplicar duty cycle inicial */
+    Pwm_SetDuty(dutyPercent);
+
+    /* 5. Iniciar CTIMER1 */
+    CTIMER1->TCR = (1UL << 0U);
+
+    return kStatus_Success;
+}
+
+status_t Pwm_SetFrequency(uint32_t freqHz)
+{
+    if (freqHz != 500U && freqHz != 1000U && freqHz != 2000U)
+    {
+        return kStatus_InvalidArgument;
+    }
+
+    s_currentPwmFreqHz = freqHz;
+    s_pwmPeriodCounts = 1000000U / freqHz;
+
+    /* Actualizar registro de período Match 3 */
+    CTIMER1->MR[3] = s_pwmPeriodCounts - 1U;
+
+    /* Recalcular Match 2 para el duty cycle actual */
+    Pwm_SetDuty(s_currentPwmDuty);
+
+    return kStatus_Success;
+}
+
+status_t Pwm_SetDuty(uint32_t dutyPercent)
+{
+    if (dutyPercent > 100U)
+    {
+        return kStatus_InvalidArgument;
+    }
+
+    s_currentPwmDuty = dutyPercent;
+
+    /* Manejo especial de 0% y 100% para garantizar niveles DC perfectos sin pulsos residuales */
+    if (dutyPercent == 0U)
+    {
+        /* Desconectar del periférico PWM y forzar nivel BAJO constante mediante GPIO */
+        Pwm_ConfigurePinMux(false);
+        GPIO_PinWrite(GPIO3, 12U, 0U);
+        CTIMER1->MR[2] = s_pwmPeriodCounts; /* Sin coincidencia activa */
+    }
+    else if (dutyPercent == 100U)
+    {
+        /* Desconectar del periférico PWM y forzar nivel ALTO constante mediante GPIO */
+        Pwm_ConfigurePinMux(false);
+        GPIO_PinWrite(GPIO3, 12U, 1U);
+        CTIMER1->MR[2] = 0U;
+    }
+    else
+    {
+        /* Configurar pin en ALT4 (CT1_MAT2) */
+        Pwm_ConfigurePinMux(true);
+
+        /* En CTIMER PWM con salida activa alta:
+         * El pulso está en alto mientras TC < MR[periodo - matchValue].
+         * matchValue = (periodCounts * (100 - duty)) / 100
+         */
+        uint32_t matchVal = (s_pwmPeriodCounts * (100U - dutyPercent)) / 100U;
+        CTIMER1->MR[2] = matchVal;
+    }
+
+    return kStatus_Success;
+}
+
+uint32_t Pwm_GetFrequency(void)
+{
+    return s_currentPwmFreqHz;
+}
+
+uint32_t Pwm_GetDuty(void)
+{
+    return s_currentPwmDuty;
+}
