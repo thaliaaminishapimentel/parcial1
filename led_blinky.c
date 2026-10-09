@@ -13,6 +13,11 @@
  * Programa Principal - Planificación No Bloqueante
  ******************************************************************************/
 
+/* Variables globales de estado compartidas */
+app_state_t g_appCurrentState = STATE_MANUAL;
+uint32_t    g_manualSavedDuty = PWM_DEFAULT_DUTY_PERCENT;
+bool        g_streamEnabled   = false;
+
 int main(void)
 {
     /* 1. Inicialización de la placa, pines y consola de depuración */
@@ -22,16 +27,26 @@ int main(void)
     GPIO_InitApp();
     Timer_TickInit();
     Pwm_Init(PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_DUTY_PERCENT);
+    Uart_InitConsole();
+
+    Uart_SendString("\r\n========================================\r\n");
+    Uart_SendString("FRDM-MCXA156: Controlador de Iluminacion\r\n");
+    Uart_SendString("Estudiante: Thalia Pimentel (20250531)\r\n");
+    Uart_SendString("Escriba HELP para ver la lista de comandos\r\n");
+    Uart_SendString("========================================\r\n");
 
     /* Variables de temporización no bloqueante basadas en diferencias de 32 bits */
     uint32_t lastTickService = Timer_GetMs();
-    uint32_t lastLedBlinkMs  = Timer_GetMs();
+    uint32_t lastStreamMs    = Timer_GetMs();
 
     while (1)
     {
         uint32_t now = Timer_GetMs();
 
-        /* Tarea de 1 ms: Procesar antirrebote y eventos del pulsador */
+        /* Tarea 1: Procesar comandos UART de forma continua y no bloqueante */
+        Uart_ProcessConsole();
+
+        /* Tarea 2 (cada 1 ms): Procesar antirrebote y eventos del pulsador */
         if ((uint32_t)(now - lastTickService) >= 1U)
         {
             lastTickService = now;
@@ -39,21 +54,26 @@ int main(void)
             button_event_t btnEvent = Button_ProcessTick();
             if (btnEvent == BTN_EVENT_SHORT)
             {
-                /* En MANUAL, una corta alternará estado básico por ahora */
                 StatusLed_Toggle();
             }
             else if (btnEvent == BTN_EVENT_LONG)
             {
-                /* Pulsación larga detectada */
                 StatusLed_Set(false);
             }
         }
 
-        /* Demostración de temporización concurrente sin delay (ej. cada 500 ms) */
-        if ((uint32_t)(now - lastLedBlinkMs) >= 500U)
+        /* Tarea 3 (cada 1000 ms): Telemetría periódica si STREAM ON está activo */
+        if (g_streamEnabled && ((uint32_t)(now - lastStreamMs) >= 1000U))
         {
-            lastLedBlinkMs = now;
-            /* Heartbeat concurrente sin bloquear la ejecución */
+            lastStreamMs = now;
+            char streamBuf[96];
+            snprintf(streamBuf, sizeof(streamBuf),
+                     "STREAM: Modo=%d, Freq=%luHz, Duty=%lu%%, Uptime=%lus\r\n",
+                     g_appCurrentState,
+                     (unsigned long)Pwm_GetFrequency(),
+                     (unsigned long)Pwm_GetDuty(),
+                     (unsigned long)(now / 1000U));
+            Uart_SendString(streamBuf);
         }
     }
 }

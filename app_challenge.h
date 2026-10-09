@@ -99,4 +99,14 @@ status_t Pwm_SetDuty(uint32_t dutyPercent);
 uint32_t Pwm_GetFrequency(void);
 uint32_t Pwm_GetDuty(void);
 
+/*******************************************************************************
+ * Definiciones y Prototipos de UART con Búfer Circular y Parser
+ ******************************************************************************/
+#define UART_RING_BUFFER_SIZE      128U
+#define UART_MAX_LINE_LENGTH       63U
+
+void Uart_InitConsole(void);
+void Uart_SendString(const char *str);
+void Uart_ProcessConsole(void);
+
 #endif /* _APP_CHALLENGE_H_ */

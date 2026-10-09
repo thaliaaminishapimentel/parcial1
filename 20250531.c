@@ -390,3 +390,396 @@ uint32_t Pwm_GetDuty(void)
 {
     return s_currentPwmDuty;
 }
+
+/*******************************************************************************
+ * Driver LPUART0 con Búfer Circular (128 bytes) y Parser de Comandos
+ * - Reconoce CR, LF y CRLF sin generar órdenes dobles.
+ * - Validación numérica exhaustiva (rechaza "DUTY 20abc", "-1", "101").
+ * - Respuestas normalizadas: OK, ERR COMMAND, ERR ARG, ERR RANGE, ERR STATE, ERR OVERFLOW.
+ ******************************************************************************/
+
+#include "fsl_lpuart.h"
+#include <string.h>
+#include <stdio.h>
+#include <ctype.h>
+
+/* Búfer circular de recepción de al menos 128 bytes */
+static volatile uint8_t  s_rxRingBuffer[UART_RING_BUFFER_SIZE];
+static volatile uint16_t s_rxHead = 0U;
+static volatile uint16_t s_rxTail = 0U;
+static volatile uint32_t s_rxOverflowErrors = 0U;
+
+/* Búfer de ensamblado de línea */
+static char     s_lineBuffer[UART_MAX_LINE_LENGTH + 1U];
+static uint16_t s_lineIndex = 0U;
+static bool     s_lineOverflowDiscard = false;
+static bool     s_lastCharWasCr = false;
+
+/* Variables globales compartidas de estado (se sincronizarán con la FSM) */
+extern app_state_t g_appCurrentState;
+extern uint32_t    g_manualSavedDuty;
+extern bool        g_streamEnabled;
+
+void LPUART0_IRQHandler(void)
+{
+    uint32_t status = LPUART0->STAT;
+
+    /* Verificar si hay dato en el registro receptor */
+    if (status & LPUART_STAT_RDRF_MASK)
+    {
+        uint8_t byte = (uint8_t)(LPUART0->DATA);
+        uint16_t nextHead = (s_rxHead + 1U) % UART_RING_BUFFER_SIZE;
+
+        if (nextHead != s_rxTail)
+        {
+            s_rxRingBuffer[s_rxHead] = byte;
+            s_rxHead = nextHead;
+        }
+        else
+        {
+            s_rxOverflowErrors++; /* Búfer lleno: registrar desbordamiento */
+        }
+    }
+
+    /* Limpiar flags de error si ocurrieron */
+    if (status & (LPUART_STAT_OR_MASK | LPUART_STAT_NF_MASK | LPUART_STAT_FE_MASK | LPUART_STAT_PF_MASK))
+    {
+        LPUART0->STAT |= (LPUART_STAT_OR_MASK | LPUART_STAT_NF_MASK | LPUART_STAT_FE_MASK | LPUART_STAT_PF_MASK);
+    }
+
+    SDK_ISR_EXIT_BARRIER;
+}
+
+void Uart_InitConsole(void)
+{
+    /* Habilitar reloj de LPUART0 usando FRO12M (12 MHz) */
+    CLOCK_SetClockDiv(kCLOCK_DivLPUART0, 1U);
+    CLOCK_AttachClk(kFRO12M_to_LPUART0);
+    RESET_ReleasePeripheralReset(kLPUART0_RST_SHIFT_RSTn);
+
+    /* Pines P0_2 (RX) y P0_3 (TX) configurados en ALT2 */
+    CLOCK_EnableClock(kCLOCK_GatePORT0);
+    const port_pin_config_t uartPinConfig = {
+        .pullSelect = kPORT_PullDisable,
+        .slewRate = kPORT_FastSlewRate,
+        .passiveFilterEnable = kPORT_PassiveFilterDisable,
+        .openDrainEnable = kPORT_OpenDrainDisable,
+        .driveStrength = kPORT_LowDriveStrength,
+        .mux = kPORT_MuxAlt2,
+        .inputBuffer = kPORT_InputBufferEnable,
+        .invertInput = kPORT_InputNormal,
+        .lockRegister = kPORT_UnlockRegister
+    };
+    PORT_SetPinConfig(PORT0, 2U, &uartPinConfig);
+    PORT_SetPinConfig(PORT0, 3U, &uartPinConfig);
+
+    lpuart_config_t config;
+    LPUART_GetDefaultConfig(&config);
+    config.baudRate_Bps = 115200U;
+    config.enableTx     = true;
+    config.enableRx     = true;
+
+    LPUART_Init(LPUART0, &config, 12000000U);
+
+    /* Habilitar interrupción de recepción */
+    LPUART_EnableInterrupts(LPUART0, kLPUART_RxDataRegFullInterruptEnable);
+    NVIC_SetPriority(LPUART0_IRQn, 3);
+    EnableIRQ(LPUART0_IRQn);
+}
+
+void Uart_SendString(const char *str)
+{
+    if (str == NULL) return;
+    while (*str != '\0')
+    {
+        while ((LPUART0->STAT & LPUART_STAT_TDRE_MASK) == 0U)
+        {
+            /* Esperar buffer TX listo */
+        }
+        LPUART0->DATA = (uint8_t)(*str++);
+    }
+}
+
+static bool Uart_GetRxByte(uint8_t *byte)
+{
+    if (s_rxHead == s_rxTail)
+    {
+        return false;
+    }
+    *byte = s_rxRingBuffer[s_rxTail];
+    s_rxTail = (s_rxTail + 1U) % UART_RING_BUFFER_SIZE;
+    return true;
+}
+
+/* Función auxiliar para validar cadenas de enteros estrictamente */
+static bool ParseStrictUnsignedInt(const char *str, uint32_t *outVal)
+{
+    if (str == NULL || *str == '\0') return false;
+
+    /* Ignorar espacios iniciales */
+    while (*str == ' ') str++;
+    if (*str == '\0') return false;
+
+    uint64_t val = 0;
+    while (*str != '\0' && *str != ' ')
+    {
+        if (!isdigit((unsigned char)*str))
+        {
+            return false; /* Rechaza '20abc', caracteres negativos, etc. */
+        }
+        val = val * 10U + (uint32_t)(*str - '0');
+        if (val > 1000000U) return false; /* Prevenir desbordamiento aritmético */
+        str++;
+    }
+
+    /* Verificar si hay caracteres residuales tras espacios finales */
+    while (*str == ' ') str++;
+    if (*str != '\0') return false;
+
+    *outVal = (uint32_t)val;
+    return true;
+}
+
+/* Ejecutor y validador de comandos */
+static void Uart_ExecuteCommand(char *cmdLine)
+{
+    /* 1. Recortar espacios al inicio y fin */
+    char *p = cmdLine;
+    while (*p == ' ') p++;
+    if (*p == '\0') return; /* Línea vacía */
+
+    int len = strlen(p);
+    while (len > 0 && p[len - 1] == ' ')
+    {
+        p[--len] = '\0';
+    }
+
+    /* 2. Procesamiento de comandos */
+    if (strcmp(p, "HELP") == 0)
+    {
+        Uart_SendString("Comandos disponibles:\r\n"
+                        "  HELP\r\n"
+                        "  STATUS\r\n"
+                        "  MODE MANUAL | MODE AUTO\r\n"
+                        "  DUTY <0-100>\r\n"
+                        "  FREQ <500|1000|2000>\r\n"
+                        "  PAUSE | RESUME\r\n"
+                        "  STREAM ON | STREAM OFF\r\n");
+    }
+    else if (strcmp(p, "STATUS") == 0)
+    {
+        char resp[128];
+        const char *stateStr = (g_appCurrentState == STATE_MANUAL) ? "MANUAL" :
+                               (g_appCurrentState == STATE_AUTO)   ? "AUTO" : "PAUSA";
+        snprintf(resp, sizeof(resp),
+                 "STATUS: Modo=%s, Freq=%luHz, Duty=%lu%%, SavedDuty=%lu%%, Uptime=%lus, BtnShort=%lu, BtnLong=%lu, RxErr=%lu\r\n",
+                 stateStr,
+                 (unsigned long)Pwm_GetFrequency(),
+                 (unsigned long)Pwm_GetDuty(),
+                 (unsigned long)g_manualSavedDuty,
+                 (unsigned long)(Timer_GetMs() / 1000U),
+                 (unsigned long)Button_GetShortPressCount(),
+                 (unsigned long)Button_GetLongPressCount(),
+                 (unsigned long)s_rxOverflowErrors);
+        Uart_SendString(resp);
+    }
+    else if (strncmp(p, "MODE ", 5) == 0)
+    {
+        if (g_appCurrentState == STATE_PAUSA)
+        {
+            Uart_SendString("ERR STATE\r\n");
+            return;
+        }
+        char *arg = p + 5;
+        while (*arg == ' ') arg++;
+
+        if (strcmp(arg, "MANUAL") == 0)
+        {
+            g_appCurrentState = STATE_MANUAL;
+            Pwm_SetDuty(g_manualSavedDuty);
+            StatusLed_Set(true); /* Fijo encendido en MANUAL */
+            Uart_SendString("OK\r\n");
+        }
+        else if (strcmp(arg, "AUTO") == 0)
+        {
+            g_appCurrentState = STATE_AUTO;
+            Uart_SendString("OK\r\n");
+        }
+        else
+        {
+            Uart_SendString("ERR ARG\r\n");
+        }
+    }
+    else if (strncmp(p, "DUTY", 4) == 0)
+    {
+        if (p[4] != ' ')
+        {
+            Uart_SendString("ERR COMMAND\r\n");
+            return;
+        }
+        if (g_appCurrentState == STATE_PAUSA)
+        {
+            Uart_SendString("ERR STATE\r\n");
+            return;
+        }
+        if (g_appCurrentState == STATE_AUTO)
+        {
+            Uart_SendString("ERR STATE\r\n"); /* En AUTO se rechaza */
+            return;
+        }
+
+        uint32_t dutyVal = 0;
+        if (!ParseStrictUnsignedInt(p + 5, &dutyVal))
+        {
+            Uart_SendString("ERR ARG\r\n");
+            return;
+        }
+        if (dutyVal > 100U)
+        {
+            Uart_SendString("ERR RANGE\r\n");
+            return;
+        }
+
+        g_manualSavedDuty = dutyVal;
+        Pwm_SetDuty(dutyVal);
+        Uart_SendString("OK\r\n");
+    }
+    else if (strncmp(p, "FREQ", 4) == 0)
+    {
+        if (p[4] != ' ')
+        {
+            Uart_SendString("ERR COMMAND\r\n");
+            return;
+        }
+        if (g_appCurrentState == STATE_PAUSA)
+        {
+            Uart_SendString("ERR STATE\r\n");
+            return;
+        }
+
+        uint32_t freqVal = 0;
+        if (!ParseStrictUnsignedInt(p + 5, &freqVal))
+        {
+            Uart_SendString("ERR ARG\r\n");
+            return;
+        }
+        if (freqVal != 500U && freqVal != 1000U && freqVal != 2000U)
+        {
+            Uart_SendString("ERR RANGE\r\n");
+            return;
+        }
+
+        Pwm_SetFrequency(freqVal);
+        Uart_SendString("OK\r\n");
+    }
+    else if (strcmp(p, "PAUSE") == 0)
+    {
+        if (g_appCurrentState == STATE_PAUSA)
+        {
+            Uart_SendString("OK\r\n"); /* Si ya está pausado responde OK sin alterar */
+        }
+        else
+        {
+            /* Entrar a pausa */
+            g_appCurrentState = STATE_PAUSA;
+            Pwm_SetDuty(0U);
+            Uart_SendString("OK\r\n");
+        }
+    }
+    else if (strcmp(p, "RESUME") == 0)
+    {
+        if (g_appCurrentState != STATE_PAUSA)
+        {
+            Uart_SendString("ERR STATE\r\n");
+        }
+        else
+        {
+            /* Reanudar al estado previo */
+            g_appCurrentState = STATE_MANUAL;
+            Pwm_SetDuty(g_manualSavedDuty);
+            StatusLed_Set(true);
+            Uart_SendString("OK\r\n");
+        }
+    }
+    else if (strcmp(p, "STREAM ON") == 0)
+    {
+        g_streamEnabled = true;
+        Uart_SendString("OK\r\n");
+    }
+    else if (strcmp(p, "STREAM OFF") == 0)
+    {
+        g_streamEnabled = false;
+        Uart_SendString("OK\r\n");
+    }
+    else
+    {
+        Uart_SendString("ERR COMMAND\r\n");
+    }
+}
+
+void Uart_ProcessConsole(void)
+{
+    uint8_t ch = 0;
+    while (Uart_GetRxByte(&ch))
+    {
+        /* Tratamiento de terminadores: CR, LF, CRLF */
+        if (ch == '\r')
+        {
+            s_lastCharWasCr = true;
+            if (!s_lineOverflowDiscard)
+            {
+                s_lineBuffer[s_lineIndex] = '\0';
+                Uart_ExecuteCommand(s_lineBuffer);
+            }
+            else
+            {
+                Uart_SendString("ERR OVERFLOW\r\n");
+                s_lineOverflowDiscard = false;
+            }
+            s_lineIndex = 0U;
+            continue;
+        }
+
+        if (ch == '\n')
+        {
+            if (s_lastCharWasCr)
+            {
+                /* Parte del par CRLF: ignorar para no duplicar orden */
+                s_lastCharWasCr = false;
+                continue;
+            }
+
+            /* LF solitario */
+            s_lastCharWasCr = false;
+            if (!s_lineOverflowDiscard)
+            {
+                s_lineBuffer[s_lineIndex] = '\0';
+                Uart_ExecuteCommand(s_lineBuffer);
+            }
+            else
+            {
+                Uart_SendString("ERR OVERFLOW\r\n");
+                s_lineOverflowDiscard = false;
+            }
+            s_lineIndex = 0U;
+            continue;
+        }
+
+        s_lastCharWasCr = false;
+
+        /* Ensamblar carácter en la línea */
+        if (!s_lineOverflowDiscard)
+        {
+            if (s_lineIndex < UART_MAX_LINE_LENGTH)
+            {
+                s_lineBuffer[s_lineIndex++] = (char)ch;
+            }
+            else
+            {
+                /* Desbordamiento de línea (> 63 caracteres) */
+                s_lineOverflowDiscard = true;
+                s_rxOverflowErrors++;
+            }
+        }
+    }
+}
